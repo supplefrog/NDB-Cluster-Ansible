@@ -1,0 +1,26 @@
+---
+- name: Remove MySQL from cluster nodes
+  hosts: ndb_mgm, ndb_data
+  become: yes
+  tasks:
+    - name: Stop MySQL service
+      service:
+        name: mysqld
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+    - name: Get list of installed mysql packages
+      command: rpm -qa 'mysql*'
+      register: mysql_packages
+
+    - name: Remove mysql packages
+      yum:
+        name: "{{ mysql_packages.stdout_lines }}"
+        state: absent
+      when: mysql_packages.stdout_lines | length > 0
+      become: yes
+    - name: Force remove /var/lib/mysql directory recursively (shell workaround)
+      shell: rm -rf /var/lib/mysql
+      args:
+        warn: false
+      become: yes

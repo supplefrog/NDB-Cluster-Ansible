@@ -1,0 +1,175 @@
+---
+- name: Install MySQL NDB Cluster Repos 
+  hosts: ndb_mgm, ndb_data
+  become: yes
+  tasks:
+    - name: Ensure yum-utils is installed (for yum-config-manager)
+      yum:
+        name: yum-utils
+        state: present
+
+    - name: Add MySQL 8.4 Community release RPM (includes cluster repos)
+      yum:
+        name: https://repo.mysql.com/mysql84-community-release-el7-1.noarch.rpm
+        state: present
+      register: repo     
+
+    - name: Disable standard repo
+      command: yum-config-manager --disable mysql-8.4-lts-community
+
+    - name: Enable cluster repo
+      command: yum-config-manager --enable mysql-cluster-8.4-lts-community
+
+    - name: Clean yum cache if repos changed
+      command: yum clean all
+      args:
+        warn: false
+      when: repo.changed
+
+    - name: Make yum cache if repos changed
+      command: yum makecache
+      args:
+        warn: false
+      when: repo.changed
+
+- name: Install MySQL NDB Cluster - Management Node
+  hosts: ndb_mgm
+  become: yes
+  tasks:
+    - name: Install MySQL Cluster Management Server packages
+      yum:
+        name:
+          - mysql-cluster-community-server
+          - mysql-cluster-community-management-server
+          - mysql-cluster-community-client
+        state: present
+    
+    - name: Create directory for MySQL Cluster config and data
+      file:
+        path: /var/lib/mysql-cluster
+        state: directory
+        owner: mysql
+        group: mysql
+        mode: '0755'
+
+    - name: Deploy cluster config.ini file
+      copy:
+        dest: /var/lib/mysql-cluster/config.ini
+        content: |
+          [ndb_mgmd]
+          HostName=dell
+          datadir=/var/lib/mysql-cluster
+          NodeId=1
+
+          [ndbd default]
+          noofreplicas=1
+          datadir=/usr/local/mysql/data
+
+          [ndbd]
+          HostName=spandan
+          NodeId=2
+          
+          [mysqld]
+          HostName=dell
+          NodeId=50
+
+    - name: Deploy ndb_mgmd_pre_systemd script
+      copy:
+        dest: /usr/bin/ndb_mgmd_pre_systemd
+        content: |
+          #!/bin/bash
+          CONFIG=/var/lib/mysql-cluster/config.ini
+          DATADIR=/var/lib/mysql-cluster
+
+          if [ ! -d "$DATADIR/conf" ]; then
+            echo "Initializing NDB cluster metadata"
+            /usr/sbin/ndb_mgmd --initial -f "$CONFIG"
+          else
+            echo "Cluster metadata already initialized"
+          fi
+        mode: '0755'
+
+    - name: Create systemd service file for ndb_mgmd
+      copy:
+        dest: /etc/systemd/system/ndb_mgmd.service
+        content: |
+          [Unit]
+          Description=MySQL NDB Cluster Management Server
+          After=network.target
+
+          [Service]
+          Type=forking
+          ExecStartPre=/usr/bin/ndb_mgmd_pre_systemd
+          ExecStart=/usr/sbin/ndb_mgmd -f /var/lib/mysql-cluster/config.ini
+          ExecReload=/bin/kill -HUP $MAINPID
+          KillMode=process
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Reload systemd daemon
+      command: systemctl daemon-reload    
+
+    - name: Start and enable ndb_mgmd service
+      systemd:
+        name: ndb_mgmd
+        state: started
+        enabled: yes
+
+- name: Install MySQL NDB Cluster - Data Node
+  hosts: ndb_data
+  become: yes
+  tasks:
+    - name: Install MySQL Cluster Data Node packages
+      yum:
+        name:
+          - mysql-cluster-community-data-node
+          - mysql-cluster-community-client
+        state: present
+
+    - name: Create data directory for NDB
+      file:
+        path: /usr/local/mysql/data
+        state: directory
+        owner: mysql
+        group: mysql
+        mode: '0755'
+
+    - name: Create ndbd startup config file
+      copy:
+        dest: /etc/my.cnf
+        content: |
+          [mysqld]
+          ndbcluster
+
+          [mysql_cluster]
+          ndb-connectstring=localhost
+
+    - name: Deploy ndbd systemd service file
+      copy:
+        dest: /etc/systemd/system/ndbd.service
+        content: |
+          [Unit]
+          Description=MySQL NDB Data Node
+          After=network.target
+
+          [Service]
+          Type=simple
+          ExecStart=/usr/sbin/ndbd
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Reload systemd daemon
+      command: systemctl daemon-reload
+
+    - name: Start and enable ndbd service
+      systemd:
+        name: ndbd
+        state: started
+        enabled: yes
+
